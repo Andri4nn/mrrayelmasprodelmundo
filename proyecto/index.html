@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel Teachable Machine & Arduino</title>
+    <!-- Tailwind CSS para diseño moderno -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js y Teachable Machine Image Library -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+    <style>
+        .led {
+            transition: all 0.3s ease;
+        }
+        .led-on {
+            background-color: #ef4444;
+            box-shadow: 0 0 15px #ef4444, inset 0 0 5px rgba(255,255,255,0.6);
+        }
+        .led-off {
+            background-color: #1f2937;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col justify-between font-sans">
+
+    <!-- Header -->
+    <header class="bg-gray-900 border-b border-gray-800 py-4 px-6 shadow-md flex flex-wrap justify-between items-center gap-4">
+        <div>
+            <h1 class="text-xl font-bold text-white flex items-center gap-2">
+                🤖 Control Teachable Machine + Arduino
+            </h1>
+            <p class="text-sm text-gray-400">Clasificación de 6 clases con detección física/virtual</p>
+        </div>
+        
+        <div class="flex items-center gap-4">
+            <span id="connection-status" class="bg-yellow-950 text-yellow-400 border border-yellow-800 px-3 py-1 rounded-full text-sm font-medium">
+                Estado: Desconectado
+            </span>
+            <button id="connect-btn" onclick="toggleArduinoConnection()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium shadow transition text-sm">
+                Conectar con Arduino
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-2 gap-8 w-full my-auto">
+        
+        <!-- Left Column: Webcam & Model Status -->
+        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col items-center shadow-xl">
+            <h2 class="text-lg font-semibold mb-4 text-gray-200">Cámara y Predicción</h2>
+            
+            <div id="webcam-container" class="relative rounded-xl overflow-hidden border-2 border-gray-700 bg-black w-[300px] h-[300px] flex items-center justify-center shadow-inner">
+                <span class="text-gray-500 text-sm">Iniciando cámara...</span>
+            </div>
+            
+            <div class="mt-6 w-full flex justify-center gap-4">
+                <button onclick="initModel()" id="start-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg font-semibold shadow transition">
+                    Iniciar Sistema
+                </button>
+            </div>
+            <p id="model-status" class="text-xs text-gray-500 mt-3">Haz clic en "Iniciar Sistema" para cargar el modelo local.</p>
+        </div>
+
+        <!-- Right Column: 6 Classes & LEDs -->
+        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+            <div>
+                <h2 class="text-lg font-semibold mb-4 text-gray-200">Panel de Clases (6 LEDs)</h2>
+                <div id="label-container" class="space-y-4">
+                    <!-- Las 6 clases y barras se generan dinámicamente -->
+                    <div class="text-gray-500 text-sm italic">Esperando inicialización del modelo...</div>
+                </div>
+            </div>
+
+            <div class="mt-6 pt-4 border-t border-gray-800">
+                <p class="text-xs text-gray-400 text-center">El LED se iluminará cuando la clase supere el 80% de confianza.</p>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="text-center py-4 text-xs text-gray-600 border-t border-gray-900">
+        Sistema configurado para 6 clases locales (metadata.json, model.json, weights.bin)
+    </footer>
+
+    <!-- JavaScript Logic -->
+    <script>
+        const URL_LOCAL = "./"; // Archivos en la misma carpeta
+        let model, webcam, maxPredictions;
+        let port = null;
+        let writer = null;
+        let isConnected = false;
+        let connectionMode = "desconectado"; // "fisico", "virtual", "desconectado"
+
+        async function initModel() {
+            try {
+                document.getElementById('model-status').innerText = "Cargando modelo local...";
+                const modelURL = URL_LOCAL + "model.json";
+                const metadataURL = URL_LOCAL + "metadata.json";
+
+                // Cargar modelo de Teachable Machine
+                model = await tmImage.load(modelURL, metadataURL);
+                maxPredictions = model.getTotalClasses();
+
+                if (maxPredictions !== 6) {
+                    alert(`Advertencia: El modelo detectó ${maxPredictions} clases, pero configuraste 6 LEDs.`);
+                }
+
+                // Configurar Webcam
+                const flip = true; // espejo
+                webcam = new tmImage.Webcam(300, 300, flip);
+                await webcam.setup(); // Solicitar permisos de cámara
+                await webcam.play();
+                window.requestAnimationFrame(loop);
+
+                // Reemplazar placeholder con la vista de la cámara
+                const webcamContainer = document.getElementById("webcam-container");
+                webcamContainer.innerHTML = "";
+                webcamContainer.appendChild(webcam.canvas);
+
+                // Generar barras y LEDs para las 6 clases
+                const labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = "";
+                for (let i = 0; i < maxPredictions; i++) {
+                    labelContainer.innerHTML += `
+                        <div class="bg-gray-950 p-3 rounded-xl border border-gray-800 flex items-center justify-between gap-4">
+                            <div class="flex-1">
+                                <div class="flex justify-between text-sm mb-1">
+                                    <span id="class-name-${i}" class="font-medium text-gray-300">Clase ${i + 1}</span>
+                                    <span id="class-prob-${i}" class="text-gray-400 font-mono">0.00%</span>
+                                </div>
+                                <div class="w-full bg-gray-800 h-2 rounded-full overflow-hidden">
+                                    <div id="class-bar-${i}" class="bg-indigo-500 h-full w-0 transition-all duration-150"></div>
+                                </div>
+                            </div>
+                            <!-- LED correspondiente a la clase -->
+                            <div class="flex flex-col items-center">
+                                <div id="led-${i}" class="led led-off w-8 h-8 rounded-full border-2 border-gray-700"></div>
+                                <span class="text-[10px] text-gray-500 mt-1">LED ${i + 1}</span>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                document.getElementById('model-status').innerText = "Modelo cargado y cámara activa.";
+                document.getElementById('start-btn').disabled = true;
+                document.getElementById('start-btn').classList.add('opacity-50', 'cursor-not-allowed');
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('model-status').innerText = "Error al cargar modelo. Asegúrate de ejecutarlo desde un servidor local (ej. Live Server).";
+            }
+        }
+
+        async function loop() {
+            webcam.update(); // actualizar frame de la webcam
+            await predict();
+            window.requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            if (!model) return;
+            const prediction = await model.predict(webcam.canvas);
+            
+            let highestProbIndex = 0;
+            let highestProb = 0;
+
+            for (let i = 0; i < maxPredictions; i++) {
+                const className = prediction[i].className;
+                const probability = prediction[i].probability.toFixed(2);
+                
+                // Actualizar nombres si vienen del metadata
+                document.getElementById(`class-name-${i}`).innerText = className;
+                document.getElementById(`class-prob-${i}`).innerText = `${(prediction[i].probability * 100).toFixed(1)}%`;
+                document.getElementById(`class-bar-${i}`).style.width = `${prediction[i].probability * 100}%`;
+
+                if (prediction[i].probability > highestProb) {
+                    highestProb = prediction[i].probability;
+                    highestProbIndex = i;
+                }
+            }
+
+            // Actualizar estado visual de los 6 LEDs (enciende solo el de mayor probabilidad si es > 0.8)
+            for (let i = 0; i < maxPredictions; i++) {
+                const led = document.getElementById(`led-${i}`);
+                if (i === highestProbIndex && highestProb > 0.8) {
+                    if (!led.classList.contains('led-on')) {
+                        led.classList.remove('led-off');
+                        led.classList.add('led-on');
+                        // Enviar señal si Arduino físico está conectado
+                        sendToArduino(i);
+                    }
+                } else {
+                    led.classList.remove('led-on');
+                    led.classList.add('led-off');
+                }
+            }
+        }
+
+        // Conexión Arduino (Físico vía Web Serial / Virtual automático)
+        async function toggleArduinoConnection() {
+            const statusBadge = document.getElementById('connection-status');
+            const connectBtn = document.getElementById('connect-btn');
+
+            if (!isConnected) {
+                // Intentar conectar hardware físico mediante Web Serial API
+                if ('serial' in navigator) {
+                    try {
+                        port = await navigator.serial.requestPort();
+                        await port.open({ baudRate: 9600 });
+                        writer = port.writable.getWriter();
+                        
+                        isConnected = true;
+                        connectionMode = "fisico";
+                        statusBadge.innerText = "Estado: Conectado (Arduino Físico)";
+                        statusBadge.className = "bg-emerald-950 text-emerald-400 border border-emerald-800 px-3 py-1 rounded-full text-sm font-medium";
+                        connectBtn.innerText = "Desconectar";
+                        connectBtn.className = "bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-medium shadow transition text-sm";
+                        return;
+                    } catch (err) {
+                        console.log("Usuario canceló o puerto ocupado. Cambiando a Modo Virtual...", err);
+                    }
+                }
+
+                // Si no hay Web Serial compatible o el usuario canceló, activar Modo Virtual
+                isConnected = true;
+                connectionMode = "virtual";
+                statusBadge.innerText = "Estado: Conectado (Modo Virtual / Simulado)";
+                statusBadge.className = "bg-blue-950 text-blue-400 border border-blue-800 px-3 py-1 rounded-full text-sm font-medium";
+                connectBtn.innerText = "Desconectar";
+                connectBtn.className = "bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-medium shadow transition text-sm";
+                
+            } else {
+                // Desconectar
+                if (port) {
+                    try {
+                        if (writer) {
+                            writer.releaseLock();
+                        }
+                        await port.close();
+                    } catch (e) {
+                        console.error(e);
+                    }
+                    port = null;
+                    writer = null;
+                }
+                isConnected = false;
+                connectionMode = "desconectado";
+                statusBadge.innerText = "Estado: Desconectado";
+                statusBadge.className = "bg-yellow-950 text-yellow-400 border border-yellow-800 px-3 py-1 rounded-full text-sm font-medium";
+                connectBtn.innerText = "Conectar con Arduino";
+                connectBtn.className = "bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium shadow transition text-sm";
+            }
+        }
+
+        // Enviar datos por puerto serie si está conectado físicamente
+        async function sendToArduino(classIndex) {
+            if (connectionMode === "fisico" && writer) {
+                try {
+                    const data = new TextEncoder().encode(`${classIndex}\n`);
+                    await writer.write(data);
+                } catch (err) {
+                    console.error("Error enviando datos al Arduino:", err);
+                }
+            }
+        }
+    </script>
+</body>
+</html>
